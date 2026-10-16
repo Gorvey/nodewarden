@@ -1,56 +1,53 @@
-name: Sync upstream and deploy
+name: Sync upstream
 
 on:
   schedule:
+    # Daily at 03:17 UTC (11:17 Asia/Shanghai).
     - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: sync-and-deploy
+  group: sync-upstream-main
   cancel-in-progress: false
 
 jobs:
-  sync-and-deploy:
+  sync:
+    if: github.repository == 'Gorvey/nodewarden'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Sync fork with upstream
-        id: sync
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-        with:
-          upstream_sync_repo: shuaiplus/NodeWarden
-          upstream_sync_branch: main
-          target_sync_branch: main
-          git_push_args: --force-with-lease
-
-      - name: Check for new commits
-        id: changed
-        run: |
-          if [[ "${{ steps.sync.outputs.has_new_commits }}" == "true" ]]; then
-            echo "updated=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "updated=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout
-        if: steps.changed.outputs.updated == 'true'
+      # A repository-scoped SSH deploy key can also sync upstream workflow
+      # changes. GITHUB_TOKEN cannot grant workflows:write to itself.
+      - name: Checkout fork
         uses: actions/checkout@v4
-
-      - name: Setup Node
-        if: steps.changed.outputs.updated == 'true'
-        uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
 
-      - name: Install dependencies
-        if: steps.changed.outputs.updated == 'true'
-        run: npm ci
-
-      - name: Deploy to Cloudflare Workers
-        if: steps.changed.outputs.updated == 'true'
-        run: npm run deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Merge upstream without overwriting fork configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/shuaiplus/nodewarden.git
+          git fetch --no-tags upstream main
+          before=$(git rev-parse HEAD)
+          upstream=$(git rev-parse upstream/main)
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo 'Already up to date with upstream.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Conflicts fail the job instead of discarding local configuration.
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
+          {
+            echo "Synced upstream commit: $upstream"
+            echo "Previous fork commit: $before"
+            echo 'Cloudflare Workers Builds deploys the resulting main push.'
+            echo 'Check the Cloudflare build separately; sync success is not deployment success.'
+          } >> "$GITHUB_STEP_SUMMARY"
