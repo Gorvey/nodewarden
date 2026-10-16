@@ -1,0 +1,56 @@
+name: Sync upstream and deploy
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork with upstream
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          upstream_sync_repo: shuaiplus/NodeWarden
+          upstream_sync_branch: main
+          target_sync_branch: main
+          git_push_args: --force-with-lease
+
+      - name: Check for new commits
+        id: changed
+        run: |
+          if [[ "${{ steps.sync.outputs.has_new_commits }}" == "true" ]]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.changed.outputs.updated == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: steps.changed.outputs.updated == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.changed.outputs.updated == 'true'
+        run: npm ci
+
+      - name: Deploy to Cloudflare Workers
+        if: steps.changed.outputs.updated == 'true'
+        run: npm run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
